@@ -22,8 +22,9 @@ Runs TCP_RR, TCP_CRR, and TCP_STREAM benchmarks from netperf across two
 machines.
 """
 
+import csv
+import io
 import logging
-import re
 
 from perfkitbenchmarker import flags
 from perfkitbenchmarker import vm_util
@@ -31,7 +32,8 @@ from perfkitbenchmarker import vm_util
 FLAGS = flags.FLAGS
 
 BENCHMARKS_INFO = {'name': 'netperf_simple',
-                   'description': 'Run Netperf tcp_rr, tcp_crr, and tcp_stream',
+                   'description': 'Run Netperf TCP_RR, TCP_CRR, UDP_RR, '
+                   'and TCP_STREAM tests',
                    'scratch_disk': False,
                    'num_machines': 2}
 
@@ -92,15 +94,30 @@ def RunNetperf(vm, benchmark_name, server_ip):
         the sample metric (string), value (float), unit (string),
         and empty metadata dictionary (to be filled out later).
   """
+  # Flags:
+  # -I denotes the confidence interval and width.
+  # -i gives the maximum and minimum iterations to achieve the bounds from '-I'
+  # -o specifies keys to include in CSV output.
   netperf_cmd = ('{src}/netperf -p {command_port} -t {benchmark_name} '
-                 '-H {server_ip} -- -P {data_port}').format(
+                 '-H {server_ip} -I 99,5 -i 20,3 -- '
+                 '-P {data_port} '
+                 '-o THROUGHPUT,THROUGHPUT_UNITS,THROUGHPUT_CONFID,'
+                 'CONFIDENCE_ITERATION').format(
                      src=NETPERF_SRC, benchmark_name=benchmark_name,
                      server_ip=server_ip, command_port=COMMAND_PORT,
                      data_port=DATA_PORT)
-  logging.info('Netperf Results:')
   stdout, _ = vm.RemoteCommand(netperf_cmd, should_log=True)
-  match = re.search(r'(\d+\.\d+)\s+\n', stdout).group(1)
-  value = float(match)
+
+  fp = io.StringIO(stdout)
+  # "-o" flag above specifies CSV output, but there is one extra header line:
+  banner = next(fp)
+  assert banner.startswith('MIGRATED'), stdout
+  r = csv.DictReader(fp)
+  row = next(r)
+  logging.info('Netperf Results: %s', row)
+  assert 'Throughput' in row, row
+
+  value = float(row['Throughput'])
   # TODO(user): Pull the test to metric name/unit mapping out into a dict.
   if benchmark_name == 'TCP_STREAM':
     metric = 'TCP_STREAM_Throughput'
@@ -108,7 +125,8 @@ def RunNetperf(vm, benchmark_name, server_ip):
   else:
     metric = '%s_Transaction_Rate' % benchmark_name
     unit = 'transactions_per_second'
-  return (metric, value, unit, {})
+  return (metric, value, unit,
+          {'conf_pct': row['Throughput Confidence Width (%)']})
 
 
 def Run(benchmark_spec):
